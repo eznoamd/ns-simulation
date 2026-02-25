@@ -894,6 +894,7 @@ name = "ns-simulation"
 version = "0.1.0"
 dependencies = [
  "anyhow",
+ "bytemuck",
  "console_log",
  "env_logger",
  "log",
