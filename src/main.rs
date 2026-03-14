@@ -132,6 +132,10 @@ pub struct State {
     camera_uniform: CameraUniform,
     camera_buffer: wgpu::Buffer,
     camera_bind_group: wgpu::BindGroup,
+
+    egui_ctx: egui::Context,
+    egui_state: egui_winit::State,
+    egui_renderer: egui_wgpu::Renderer,
 }
 
 impl State {
@@ -289,7 +293,7 @@ impl State {
                 &texture_bind_group_layout,
                 &camera_bind_group_layout
             ],
-            immediate_size: 0,
+            push_constant_ranges: &[],
         });
 
         let render_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -328,7 +332,7 @@ impl State {
                 mask: !0,
                 alpha_to_coverage_enabled: false,
             },
-            multiview_mask: None,
+            multiview: None,
             cache: None,
         });
         
@@ -355,6 +359,23 @@ impl State {
             a: 1.0
         };
 
+        let egui_ctx = egui::Context::default();
+
+        let egui_state = egui_winit::State::new(
+            egui_ctx.clone(),
+            egui::ViewportId::ROOT,
+            &window,
+            None,
+            None,
+            None,
+        );
+
+        let egui_renderer = egui_wgpu::Renderer::new(
+            &device,
+            config.format,
+            egui_wgpu::RendererOptions::default(),
+        );
+
         Ok(Self {
             surface,
             device,
@@ -373,6 +394,9 @@ impl State {
             camera_uniform,
             camera_buffer,
             camera_bind_group,
+            egui_ctx,
+            egui_state,
+            egui_renderer,
         })
     }
 
@@ -404,16 +428,63 @@ impl State {
         }
 
         let output = self.surface.get_current_texture()?;
-
         let view = output.texture.create_view(&wgpu::TextureViewDescriptor::default());
 
-        let mut encoder = self.device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-            label: Some("Render Encoder"),
+        let mut encoder = self.device.create_command_encoder(
+            &wgpu::CommandEncoderDescriptor {
+                label: Some("Render Encoder"),
+            }
+        );
+
+        // ---------- EGUI INPUT ----------
+        let raw_input = self.egui_state.take_egui_input(&self.window);
+
+        let full_output = self.egui_ctx.run(raw_input, |ctx| {
+            egui::Window::new("Simulation").show(ctx, |ui| {
+                ui.label("ns-simulation");
+
+                if ui.button("Reset camera").clicked() {
+                    println!("reset camera");
+                }
+            });
         });
 
+        for (id, image_delta) in &full_output.textures_delta.set {
+            self.egui_renderer.update_texture(
+                &self.device,
+                &self.queue,
+                *id,
+                image_delta,
+            );
+        }
+
+        self.egui_state.handle_platform_output(
+            &self.window,
+            full_output.platform_output,
+        );
+
+        let paint_jobs = self.egui_ctx.tessellate(
+            full_output.shapes,
+            self.egui_ctx.pixels_per_point(),
+        );
+
+        let screen_descriptor = egui_wgpu::ScreenDescriptor {
+            size_in_pixels: [self.config.width, self.config.height],
+            pixels_per_point: self.egui_ctx.pixels_per_point(),
+        };
+
+        self.egui_renderer.update_buffers(
+            &self.device,
+            &self.queue,
+            &mut encoder,
+            &paint_jobs,
+            &screen_descriptor,
+        );
+
+        // ---------- PASS 1 : SCENE ----------
         {
             let mut render_pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("Render Pass"),
+                label: Some("3D Render Pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -426,17 +497,50 @@ impl State {
                 depth_stencil_attachment: None,
                 occlusion_query_set: None,
                 timestamp_writes: None,
-                multiview_mask: None,
             });
 
             render_pass.set_pipeline(&self.render_pipeline);
             render_pass.set_bind_group(0, &self.diffuse_bind_group, &[]);
             render_pass.set_bind_group(1, &self.camera_bind_group, &[]);
-            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
-            render_pass.set_index_buffer(self.index_buffer.slice(..), wgpu::IndexFormat::Uint16);
 
+            render_pass.set_vertex_buffer(0, self.vertex_buffer.slice(..));
+            render_pass.set_index_buffer(
+                self.index_buffer.slice(..),
+                wgpu::IndexFormat::Uint16,
+            );
 
             render_pass.draw_indexed(0..self.num_indices, 0, 0..1);
+        }
+
+        // ---------- PASS 2 : EGUI ----------
+        {
+            let mut render_pass = encoder
+                .begin_render_pass(&egui_wgpu::wgpu::RenderPassDescriptor {
+                    label: Some("egui Render Pass"),
+                    color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                        view: &view,
+                        resolve_target: None,
+                        depth_slice: None,
+                        ops: wgpu::Operations {
+                            load: wgpu::LoadOp::Load,
+                            store: wgpu::StoreOp::Store,
+                        },
+                    })],
+                    depth_stencil_attachment: None,
+                    occlusion_query_set: None,
+                    timestamp_writes: None,
+                })
+                .forget_lifetime();
+
+            self.egui_renderer.render(
+                &mut render_pass,
+                &paint_jobs,
+                &screen_descriptor,
+            );
+        }
+
+        for id in &full_output.textures_delta.free {
+            self.egui_renderer.free_texture(id);
         }
 
         self.queue.submit(std::iter::once(encoder.finish()));
@@ -525,6 +629,15 @@ impl ApplicationHandler<State> for App {
             None => return,
         };
 
+        let response = state.egui_state.on_window_event(
+            &state.window,
+            &event,
+        );
+
+        if response.consumed {
+            return;
+        }
+
         match event {
             WindowEvent::CloseRequested => event_loop.exit(),
             WindowEvent::Resized(size) => state.resize(size.width, size.height),
@@ -575,6 +688,6 @@ pub fn run() -> anyhow::Result<()> {
     Ok(())
 }
 
-fn main(){
+fn main() {
     let _ = run();
 }

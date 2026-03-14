@@ -5,31 +5,35 @@ edition = "2024"
 
 [dependencies]
 
-# Janela
-winit = { version = "0.30", features = ["android-native-activity"] }
+# Window
+winit = "0.30"
 
-# WGPU (simulation)
-wgpu = "28.0"
+# GPU
+wgpu = "27"
 
-# egui (gui)
-
+# GUI
+egui = "0.33"
+egui-winit = "0.33"
+egui-wgpu = "0.33"
 
 # Math
 cgmath = "0.18"
 
-# Log and Errors
+# Logging
 log = "0.4"
-console_log = "1.0.0"
+console_log = "1.0"
 env_logger = "0.10"
 anyhow = "1.0"
 
 # Utils
-pollster = "0.3" # async
-bytemuck = { version = "1.24", features = [ "derive" ] } # for bytes control
-wasm-bindgen = "0.2.108"        # suport to wasm (maybe we dont need that,
-wasm-bindgen-futures = "0.4.58" # but this still here for no problemns)
+pollster = "0.3"
+bytemuck = { version = "1.24", features = ["derive"] }
 
-# Image
+# wasm support
+wasm-bindgen = "0.2.108"
+wasm-bindgen-futures = "0.4"
+
+# Images
 [dependencies.image]
 version = "0.24"
 default-features = false
